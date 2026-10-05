@@ -35,7 +35,12 @@ fn dump_process_info(label: &str) {
     );
 }
 
-pub fn run(package_name: &String, kmi: Option<String>, allow_shell: bool) -> Result<()> {
+pub fn run(
+    package_name: &String,
+    kmi: Option<String>,
+    allow_shell: bool,
+    soft_reboot: bool,
+) -> Result<()> {
     // Stage the daemon while the loader still has its original credentials
     // and SELinux context. A late-loaded module can change both before the
     // normal install path gets a chance to copy the executable.
@@ -74,7 +79,7 @@ pub fn run(package_name: &String, kmi: Option<String>, allow_shell: bool) -> Res
     }
 
     // We need to reset stdin/stdout/stderr; otherwise, sending file descriptors via cmd transactions
-    // will be blocked by SELinux because its fsec->sid is still u:r:su:s0 instead of u:r:ksu:s0.
+    // will be blocked by SELinux because its fsec->sid is still u:r:vendor_modprobe:s0 instead of u:r:ksu:s0.
     utils::reset_std()?;
 
     utils::umask(0);
@@ -135,18 +140,23 @@ pub fn run(package_name: &String, kmi: Option<String>, allow_shell: bool) -> Res
     // 13. Execute boot-completed stage scripts (non-blocking)
     init_event::run_stage("boot-completed", ScriptWait::NoWait);
 
-    // 14. Restart Manager so it gets a fresh ksu fd from the newly loaded kernel module
-    info!("Restarting KernelSU Next Manager {package_name}...");
-    let _ = Command::new("am")
-        .args(["force-stop", package_name])
-        .status();
-    let _ = Command::new("am")
-        .args([
-            "start",
-            "-n",
-            &format!("{package_name}/com.rifsxd.ksunext.ui.MainActivity"),
-        ])
-        .status();
+    // 14. Restart Manager so it gets a fresh ksu fd from the newly loaded kernel module.
+    //     When --soft-reboot is used, skip this: the manager will be restarted
+    //     as part of the reboot sequence instead, and we want modules to load
+    //     fresh after the soft reboot.
+    if !soft_reboot {
+        info!("Restarting KernelSU Next Manager {package_name}...");
+        let _ = Command::new("am")
+            .args(["force-stop", package_name])
+            .status();
+        let _ = Command::new("am")
+            .args([
+                "start",
+                "-n",
+                &format!("{package_name}/com.rifsxd.ksunext.ui.MainActivity"),
+            ])
+            .status();
+    }
 
     Ok(())
 }

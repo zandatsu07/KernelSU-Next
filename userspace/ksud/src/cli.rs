@@ -55,6 +55,10 @@ enum Commands {
         /// manager package name
         #[arg(long, default_value_t = String::from("com.rifsxd.ksunext"))]
         package_name: String,
+
+        /// Trigger soft-reboot after late-load completes
+        #[arg(long)]
+        soft_reboot: bool,
     },
 
     /// Load a kernel module with kallsyms access
@@ -681,7 +685,17 @@ pub fn run() -> Result<()> {
             package_name,
             kmi,
             allow_shell,
-        } => crate::late_load::run(&package_name, kmi, allow_shell),
+            soft_reboot,
+        } => {
+            let result = crate::late_load::run(&package_name, kmi, allow_shell, soft_reboot);
+            if soft_reboot && result.is_ok() {
+                info!("Performing soft-reboot...");
+                if utils::create_daemon(false)? {
+                    crate::soft_reboot::soft_reboot()?;
+                }
+            }
+            result
+        }
         Commands::Services => {
             if ksucalls::get_version() <= 0 {
                 info!("KernelSU Next not available, exiting services");
