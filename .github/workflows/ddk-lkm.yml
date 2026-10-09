@@ -27,6 +27,11 @@ on:
         required: false
         default: ''
         type: string
+      extra_configs:
+        description: 'Extra Kconfig options, space-separated (e.g. "CONFIG_FOO=y CONFIG_BAR=y")'
+        required: false
+        default: ''
+        type: string
 
 jobs:
   build-kernelsu-ko:
@@ -40,11 +45,12 @@ jobs:
     - name: Checkout source code
       uses: actions/checkout@v7
 
-    - name: Build kernelsu.ko
+    - name: Build kernelsu.ko (aarch64)
       env:
         MANAGER_PACKAGE: ${{ inputs.manager_package }}
         EXPECTED_MANAGER_SIZE: ${{ inputs.expected_manager_size }}
         EXPECTED_MANAGER_HASH: ${{ inputs.expected_manager_hash }}
+        EXTRA_CONFIGS: ${{ inputs.extra_configs }}
       run: |
         git config --global --add safe.directory /__w/KernelSU-Next/KernelSU-Next
 
@@ -53,6 +59,18 @@ jobs:
         echo "=== Building kernelsu.ko for KMI: ${{ inputs.kmi }} ==="
 
         EXTRA_ARGS=""
+
+        # Samsung Kconfig options (late load patch)
+        SAMSUNG_CONFIGS="CONFIG_KSU_SAMSUNG_KDP=y CONFIG_KSU_SAMSUNG_RKP=y CONFIG_KSU_SAMSUNG_DEFEX=y CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT=y"
+
+        if [ -n "$SAMSUNG_CONFIGS" ]; then
+          EXTRA_ARGS="$EXTRA_ARGS $SAMSUNG_CONFIGS"
+        fi
+
+        if [ -n "$EXTRA_CONFIGS" ]; then
+          EXTRA_ARGS="$EXTRA_ARGS $EXTRA_CONFIGS"
+        fi
+
         if [ -n "$MANAGER_PACKAGE" ]; then
           EXTRA_ARGS="$EXTRA_ARGS KSU_MANAGER_PACKAGE=$MANAGER_PACKAGE"
         fi
@@ -63,8 +81,10 @@ jobs:
           EXTRA_ARGS="$EXTRA_ARGS KSU_NEXT_MANAGER_HASH=$EXPECTED_MANAGER_HASH"
         fi
 
+        echo "Extra args: $EXTRA_ARGS"
+
         CONFIG_KSU=m CC=clang make $EXTRA_ARGS
-        
+
         echo "=== Build completed ==="
 
         # Create output directory in GitHub workspace
@@ -74,24 +94,25 @@ jobs:
         # Copy with KMI-specific naming
         OUTPUT_NAME="${{ inputs.kmi }}_kernelsu.ko"
         cp kernelsu.ko "$OUT_DIR/$OUTPUT_NAME"
-        
+
         echo "Copied to: $OUT_DIR/$OUTPUT_NAME"
         ls -la "$OUT_DIR/$OUTPUT_NAME"
         echo "Size: $(du -h "$OUT_DIR/$OUTPUT_NAME" | cut -f1)"
         llvm-strip -d "$OUT_DIR/$OUTPUT_NAME"
         echo "Size after stripping: $(du -h "$OUT_DIR/$OUTPUT_NAME" | cut -f1)"
 
-    - name: Upload kernelsu.ko artifact
+    - name: Upload aarch64 kernelsu.ko artifact
       uses: actions/upload-artifact@v7
       with:
         name: aarch64-${{ inputs.kmi }}-lkm
         path: /github/workspace/out/aarch64/${{ inputs.kmi }}_kernelsu.ko
 
-    - name: Build kernelsu.ko for x64
+    - name: Build kernelsu.ko (x86_64)
       env:
         MANAGER_PACKAGE: ${{ inputs.manager_package }}
         EXPECTED_MANAGER_SIZE: ${{ inputs.expected_manager_size }}
         EXPECTED_MANAGER_HASH: ${{ inputs.expected_manager_hash }}
+        EXTRA_CONFIGS: ${{ inputs.extra_configs }}
       run: |
         cd kernel
         make clean
@@ -124,10 +145,22 @@ jobs:
         # Generate SELinux headers through Kbuild in this x86 output tree.
         make O=$KDIR security/selinux/built-in.a
         popd
-        
+
         echo "=== Building x64 kernelsu.ko for KMI: ${{ inputs.kmi }} ==="
 
         EXTRA_ARGS=""
+
+        # Samsung Kconfig options (late load patch)
+        SAMSUNG_CONFIGS="CONFIG_KSU_SAMSUNG_KDP=y CONFIG_KSU_SAMSUNG_RKP=y CONFIG_KSU_SAMSUNG_DEFEX=y CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT=y"
+
+        if [ -n "$SAMSUNG_CONFIGS" ]; then
+          EXTRA_ARGS="$EXTRA_ARGS $SAMSUNG_CONFIGS"
+        fi
+
+        if [ -n "$EXTRA_CONFIGS" ]; then
+          EXTRA_ARGS="$EXTRA_ARGS $EXTRA_CONFIGS"
+        fi
+
         if [ -n "$MANAGER_PACKAGE" ]; then
           EXTRA_ARGS="$EXTRA_ARGS KSU_MANAGER_PACKAGE=$MANAGER_PACKAGE"
         fi
@@ -137,15 +170,19 @@ jobs:
         if [ -n "$EXPECTED_MANAGER_HASH" ]; then
           EXTRA_ARGS="$EXTRA_ARGS KSU_NEXT_MANAGER_HASH=$EXPECTED_MANAGER_HASH"
         fi
-        
+
+        echo "Extra args: $EXTRA_ARGS"
+
         MDIR=$(realpath .)
 
         if [ "$kmi" == "android17-6.18" ]; then
-          make -C $KDIR M=$MDIR MO=$MDIR compile_commands.json modules CONFIG_KSU=m CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER=y $EXTRA_ARGS
+          make -C $KDIR M=$MDIR MO=$MDIR compile_commands.json modules \
+            CONFIG_KSU=m CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER=y $EXTRA_ARGS
         else
-          make -C $KDIR M=$MDIR src=$MDIR compile_commands.json modules CONFIG_KSU=m CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER=y $EXTRA_ARGS
+          make -C $KDIR M=$MDIR src=$MDIR compile_commands.json modules \
+            CONFIG_KSU=m CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER=y $EXTRA_ARGS
         fi
-        
+
         echo "=== Build completed ==="
 
         # Create output directory in GitHub workspace
@@ -155,14 +192,14 @@ jobs:
         # Copy with KMI-specific naming
         OUTPUT_NAME="${{ inputs.kmi }}_kernelsu.ko"
         cp kernelsu.ko "$OUT_DIR/$OUTPUT_NAME"
-        
+
         echo "Copied to: $OUT_DIR/$OUTPUT_NAME"
         ls -la "$OUT_DIR/$OUTPUT_NAME"
         echo "Size: $(du -h "$OUT_DIR/$OUTPUT_NAME" | cut -f1)"
         llvm-strip -d "$OUT_DIR/$OUTPUT_NAME"
         echo "Size after stripping: $(du -h "$OUT_DIR/$OUTPUT_NAME" | cut -f1)"
-        
-    - name: Upload x64 kernelsu.ko artifact
+
+    - name: Upload x86_64 kernelsu.ko artifact
       uses: actions/upload-artifact@v7
       with:
         name: x86_64-${{ inputs.kmi }}-lkm

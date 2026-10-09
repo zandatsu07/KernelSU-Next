@@ -9,6 +9,22 @@
 #include "selinux/selinux.h"
 
 #ifdef CONFIG_KSU_SAMSUNG_DEFEX
+
+/*
+ * The first syscall argument lives in different members of struct pt_regs
+ * depending on the architecture:
+ *   - arm64:  regs->regs[0]
+ *   - x86_64: regs->di
+ * Abstract it behind a macro so this file compiles cleanly on both.
+ */
+#if defined(CONFIG_ARM64)
+#define KSU_PT_REGS_FIRST_ARG(regs) ((regs)->regs[0])
+#elif defined(CONFIG_X86_64)
+#define KSU_PT_REGS_FIRST_ARG(regs) ((regs)->di)
+#else
+#error "samsung_defex: unsupported architecture (need CONFIG_ARM64 or CONFIG_X86_64)"
+#endif
+
 typedef void (*defex_get_task_creds_t)(struct task_struct *task,
 				       unsigned int *uid, unsigned int *fsuid,
 				       unsigned int *egid,
@@ -25,11 +41,12 @@ static bool defex_enforce_hooked;
 static int ksu_samsung_defex_pre_handler(struct kprobe *probe,
 					 struct pt_regs *regs)
 {
-	struct task_struct *task = (struct task_struct *)regs->regs[0];
+	struct task_struct *task =
+		(struct task_struct *)KSU_PT_REGS_FIRST_ARG(regs);
 
 	(void)probe;
 	if (task == current && current_uid().val == 0 && is_ksu_domain())
-		regs->regs[0] = 0;
+		KSU_PT_REGS_FIRST_ARG(regs) = 0;
 
 	return 0;
 }

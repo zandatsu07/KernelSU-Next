@@ -24,11 +24,10 @@ typedef void (*kdp_assign_pgd_t)(struct task_struct *task);
 typedef unsigned int (*kdp_usecount_dec_and_test_t)(struct cred *cred);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
 typedef long (*inc_rlimit_ucounts_t)(struct ucounts *ucounts,
-				     enum rlimit_type type, long value);
+				     int type, long value);
 typedef bool (*dec_rlimit_ucounts_t)(struct ucounts *ucounts,
-				     enum rlimit_type type, long value);
+				     int type, long value);
 #endif
-
 struct samsung_kdp_commit_work {
 	struct work_struct work;
 	struct completion completion;
@@ -100,8 +99,8 @@ static void samsung_kdp_commit_worker(struct work_struct *work)
 	ksu_put_cred(old_cred);
 	ksu_put_cred(old_cred);
 	commit_work->result = 0;
-	pr_info("Samsung KDP credential install pid=%d uid=%u euid=%u\n",
-		task_pid_nr(target), __kuid_val(ro_cred->uid),
+	pr_info("Samsung KDP credential install uid=%u euid=%u\n",
+		__kuid_val(ro_cred->uid),
 		__kuid_val(ro_cred->euid));
 out:
 	complete(&commit_work->completion);
