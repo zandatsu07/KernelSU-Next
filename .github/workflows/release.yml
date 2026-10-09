@@ -20,80 +20,84 @@ jobs:
     secrets: inherit
 
   release:
-    needs:
-      - build-manager
+    needs: [build-manager]
     runs-on: ubuntu-latest
     steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Show artifacts
+        run: |
+          echo "===== artifacts/ ====="
+          find artifacts -maxdepth 3 -type f -printf '%p  (%s bytes)\n' | sort || true
 
       - name: Rename ksud
         run: |
           mkdir -p ksud
-          for dir in ./ksud-*; do
-              if [ -d "$dir" ]; then
-                 echo "----- Rename $dir -----"
-                 ksud_platform_name=$(basename "$dir")
-                 find "$dir" -type f -name "ksud" -path "*/release/*" | while read -r ksud_file; do
-                   if [ -f "$ksud_file" ]; then
-                     mv "$ksud_file" "ksud/$ksud_platform_name"
-                   fi
-                 done
-              fi
+          find artifacts -type f -name 'ksud' -path '*/release/*' | while read -r f; do
+            # f = artifacts/ksud-<target>/target/<target>/release/ksud
+            artifact=$(echo "$f" | awk -F/ '{for (i=1;i<=NF;i++) if ($i=="artifacts") {print $(i+1); exit}}')
+            mv "$f" "ksud/${artifact}"
           done
+          echo "===== ksud/ ====="
+          ls -la ksud || true
 
       - name: Rename LKM artifacts
         run: |
-          for f in ./*android*-lkm/*_kernelsu.ko; do
-            [ -f "$f" ] || continue
-            dir="${f%/*}"
-            base="${f##*/}"
-            arch="${dir#./}"
-            arch="${arch%%-*}"
-            mv "$f" "${dir}/${arch}_${base}"
+          find artifacts -type f -name '*_kernelsu.ko' | while read -r f; do
+            dir=$(dirname "$f")
+            base=$(basename "$f")
+            archdir=$(basename "$dir")     # e.g. aarch64-android14-6.1-lkm
+            arch=${archdir%%-*}            # → aarch64
+            mv "$f" "$dir/${arch}_${base}"
           done
+          echo "===== .ko files ====="
+          find artifacts -type f -name '*_kernelsu.ko' -printf '%p\n' | sort || true
 
       - name: Zip AnyKernel3
         run: |
-          for dir in AnyKernel3-*; do
-            if [ -d "$dir" ]; then
-              echo "----- Zip $dir -----"
-              (cd $dir && zip -r9 "$dir".zip ./* -x .git .gitignore ./*.zip && mv *.zip ..)
-            fi
+          shopt -s nullglob
+          for dir in artifacts/AnyKernel3-*; do
+            [ -d "$dir" ] || continue
+            echo "----- Zip $dir -----"
+            ( cd "$dir" && zip -r9 "$(basename "$dir")".zip ./* -x .git .gitignore ./*.zip )
           done
 
       - name: Zip WSA kernel
         run: |
-          for dir in kernel-WSA-*; do
-            if [ -d "$dir" ]; then
-              echo "------ Zip $dir ----------"
-              (cd $dir && zip -r9 "$dir".zip ./* -x .git .gitignore ./*.zip && mv *.zip ..)
-            fi
+          shopt -s nullglob
+          for dir in artifacts/kernel-WSA-*; do
+            [ -d "$dir" ] || continue
+            echo "------ Zip $dir ----------"
+            ( cd "$dir" && zip -r9 "$(basename "$dir")".zip ./* -x .git .gitignore ./*.zip )
           done
 
       - name: Zip ChromeOS ARCVM kernel
         run: |
-          for dir in kernel-ARCVM-*; do
-            if [ -d "$dir" ]; then
-              echo "------ Zip $dir ----------"
-              (cd $dir && zip -r9 "$dir".zip ./* -x .git .gitignore ./*.zip && mv *.zip ..)
-            fi
+          shopt -s nullglob
+          for dir in artifacts/kernel-ARCVM-*; do
+            [ -d "$dir" ] || continue
+            echo "------ Zip $dir ----------"
+            ( cd "$dir" && zip -r9 "$(basename "$dir")".zip ./* -x .git .gitignore ./*.zip )
           done
 
-      - name: Display structure of downloaded files
-        run: ls -R
+      - name: Display structure for release
+        run: |
+          echo "===== staging ====="
+          find artifacts ksud -maxdepth 3 -type f -printf '%p  (%s bytes)\n' 2>/dev/null | sort || true
 
-      - name: release
-        uses: softprops/action-gh-release@v2
+
+      - name: Release
+        uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           fail_on_unmatched_files: false
           files: |
-            manager/*.apk
-            manager-spoofed/*.apk
-            *android*-lkm/*_kernelsu.ko
-            AnyKernel3-*.zip
-            boot-images-*/Image-*/*.img.gz
-            kernel-WSA*.zip
-            kernel-ARCVM*.zip
-            ksud/ksud-*
+            artifacts/**/*.apk
+            artifacts/**/*.ko
+            artifacts/**/*.zip
+            artifacts/**/*.img.gz
+            ksud/*
