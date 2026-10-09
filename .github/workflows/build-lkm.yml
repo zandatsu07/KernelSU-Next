@@ -18,6 +18,5 @@ jobs:
     uses: ./.github/workflows/ddk-lkm.yml
     with:
       kmi: ${{ matrix.kmi }}
-      manager_package: ${{ vars.KSU_MANAGER_PACKAGE }}
       expected_manager_hash: ${{ vars.EXPECTED_MANAGER_HASH }}
       expected_manager_size: ${{ vars.EXPECTED_MANAGER_SIZE }}

@@ -12,11 +12,6 @@ on:
         required: false
         default: '20260828'
         type: string
-      manager_package:
-        description: 'manager package name'
-        required: false
-        default: ''
-        type: string
       expected_manager_size:
         description: 'expected signature size'
         required: false
@@ -47,7 +42,6 @@ jobs:
 
     - name: Build kernelsu.ko (aarch64)
       env:
-        MANAGER_PACKAGE: ${{ inputs.manager_package }}
         EXPECTED_MANAGER_SIZE: ${{ inputs.expected_manager_size }}
         EXPECTED_MANAGER_HASH: ${{ inputs.expected_manager_hash }}
         EXTRA_CONFIGS: ${{ inputs.extra_configs }}
@@ -71,9 +65,6 @@ jobs:
           EXTRA_ARGS="$EXTRA_ARGS $EXTRA_CONFIGS"
         fi
 
-        if [ -n "$MANAGER_PACKAGE" ]; then
-          EXTRA_ARGS="$EXTRA_ARGS KSU_MANAGER_PACKAGE=$MANAGER_PACKAGE"
-        fi
         if [ -n "$EXPECTED_MANAGER_SIZE" ]; then
           EXTRA_ARGS="$EXTRA_ARGS KSU_NEXT_MANAGER_SIZE=$EXPECTED_MANAGER_SIZE"
         fi
@@ -109,7 +100,6 @@ jobs:
 
     - name: Build kernelsu.ko (x86_64)
       env:
-        MANAGER_PACKAGE: ${{ inputs.manager_package }}
         EXPECTED_MANAGER_SIZE: ${{ inputs.expected_manager_size }}
         EXPECTED_MANAGER_HASH: ${{ inputs.expected_manager_hash }}
         EXTRA_CONFIGS: ${{ inputs.extra_configs }}
@@ -161,9 +151,6 @@ jobs:
           EXTRA_ARGS="$EXTRA_ARGS $EXTRA_CONFIGS"
         fi
 
-        if [ -n "$MANAGER_PACKAGE" ]; then
-          EXTRA_ARGS="$EXTRA_ARGS KSU_MANAGER_PACKAGE=$MANAGER_PACKAGE"
-        fi
         if [ -n "$EXPECTED_MANAGER_SIZE" ]; then
           EXTRA_ARGS="$EXTRA_ARGS KSU_NEXT_MANAGER_SIZE=$EXPECTED_MANAGER_SIZE"
         fi
