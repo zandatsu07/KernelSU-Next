@@ -1013,6 +1013,7 @@ private data class HomeInfoSnapshot(
     val unameRelease: String = "",
     val unameMachine: String = "",
     val seccompStatus: String = "Unavailable",
+    val selinuxStatusRes: Int = R.string.selinux_status_unknown,
 )
 
 private fun buildHomeInfoSnapshot(
@@ -1058,6 +1059,7 @@ private fun buildHomeInfoSnapshot(
         unameRelease = uname?.release.orEmpty(),
         unameMachine = uname?.machine.orEmpty(),
         seccompStatus = seccompStatus,
+        selinuxStatusRes = getSELinuxStatus(),
     )
 }
 
@@ -1209,7 +1211,7 @@ private fun InfoCard(autoExpand: Boolean = false) {
                         Spacer(Modifier.height(16.dp))
                         InfoCardItem(
                             label = stringResource(R.string.home_selinux_status),
-                            content = getSELinuxStatus(),
+                            content = stringResource(homeInfo.selinuxStatusRes),
                             icon = Icons.Filled.Security,
                         )
 
