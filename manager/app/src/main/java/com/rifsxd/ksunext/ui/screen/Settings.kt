@@ -775,7 +775,7 @@ private fun AppSettingsCard(
     exportBugreportLauncher: androidx.activity.result.ActivityResultLauncher<String>,
     loadingDialog: LoadingDialogHandle,
     scope: kotlinx.coroutines.CoroutineScope,
-    context: Context,
+    context: android.content.Context,
     isUnrooted: Boolean
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
