@@ -25,7 +25,6 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.webkit.WebViewAssetLoader
-import com.rifsxd.ksunext.R
 import com.rifsxd.ksunext.ui.util.createRootShell
 import com.rifsxd.ksunext.ui.viewmodel.SuperUserViewModel
 import kotlinx.coroutines.CancellableContinuation
@@ -406,7 +405,7 @@ class WebUIActivity : FragmentActivity() {
         mimeTypeFromListener: String
     ) {
         val extracted = extractMimeTypeAndBase64Data(dataUrl) ?: run {
-            Toast.makeText(this, getString(R.string.webui_invalid_data_url), Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Invalid data URL", Toast.LENGTH_SHORT).show()
             return
         }
 
@@ -443,7 +442,7 @@ class WebUIActivity : FragmentActivity() {
         } catch (e: Exception) {
             Toast.makeText(
                 this,
-                getString(R.string.webui_file_prepare_failed, e.message.orEmpty()),
+                "Error preparing file: ${e.message}",
                 Toast.LENGTH_LONG
             ).show()
             pendingDownloadData = null
@@ -496,7 +495,7 @@ class WebUIActivity : FragmentActivity() {
                         },
                         onError = {
                             isPromptShowing = false
-                            Toast.makeText(this, getString(R.string.auth_failed, it), Toast.LENGTH_SHORT).show()
+                            Toast.makeText(this, "Auth failed: $it", Toast.LENGTH_SHORT).show()
                             finish()
                         }
                     )

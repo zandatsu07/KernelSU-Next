@@ -162,7 +162,7 @@ fun ShortcutDialog(
                                 if (bitmap != null) {
                                     Image(
                                         bitmap = bitmap.asImageBitmap(),
-                                        contentDescription = null,
+                                        contentDescription = "Shortcut icon",
                                         modifier = Modifier
                                             .size(56.dp)
                                             .clip(RoundedCornerShape(12.dp)),

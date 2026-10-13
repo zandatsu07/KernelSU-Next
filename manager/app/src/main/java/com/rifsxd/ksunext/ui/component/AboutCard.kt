@@ -63,7 +63,7 @@ private fun AboutCardContent() {
             ) {
                 Image(
                     painter = painterResource(id = R.mipmap.ic_launcher_foreground),
-                    contentDescription = null,
+                    contentDescription = "icon",
                     modifier = Modifier.scale(1.5f)
                 )
             }

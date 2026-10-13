@@ -225,7 +225,7 @@ fun ModuleRepoScreen(navigator: DestinationsNavigator) {
                 .filter { module -> seen.add("${module.name}||${module.repoUrl}") }
 
             if (visibleModules.isEmpty()) {
-                moduleState = ModuleRepoState.Error(context.getString(R.string.repo_no_modules))
+                moduleState = ModuleRepoState.Error("No modules found across all repositories")
                 return
             }
 
@@ -265,7 +265,7 @@ fun ModuleRepoScreen(navigator: DestinationsNavigator) {
                 }
             }
         } catch (e: Exception) {
-            moduleState = ModuleRepoState.Error(e.message ?: context.getString(R.string.unknown_error))
+            moduleState = ModuleRepoState.Error(e.message ?: "Unknown error")
         }
     }
 
@@ -338,7 +338,7 @@ fun ModuleRepoScreen(navigator: DestinationsNavigator) {
                                         showAddEditDialog = true
                                     }
                                 ) {
-                                    Icon(Icons.Default.Edit, contentDescription = null)
+                                    Icon(Icons.Default.Edit, contentDescription = "Edit")
                                 }
                                 // Prevent deletion of the last remaining repo
                                 IconButton(
@@ -349,7 +349,7 @@ fun ModuleRepoScreen(navigator: DestinationsNavigator) {
                                     },
                                     enabled = jsonUrls.size > 1
                                 ) {
-                                    Icon(Icons.Default.Delete, contentDescription = null)
+                                    Icon(Icons.Default.Delete, contentDescription = "Remove")
                                 }
                             }
                             if (index < jsonUrls.lastIndex) {
@@ -398,11 +398,11 @@ fun ModuleRepoScreen(navigator: DestinationsNavigator) {
                 showAddEditDialog = false
                 pendingUrl = ""
             },
-            title = { Text(stringResource(if (editingIndex == null) R.string.add_repository else R.string.repo_edit_title)) },
+            title = { Text(if (editingIndex == null) "Add Repository" else "Edit Repository") },
             text = {
                 Column {
                     Text(
-                        text = stringResource(R.string.repo_enter_json_url),
+                        text = "Enter the module repository JSON URL:",
                         style = MaterialTheme.typography.bodyMedium,
                         modifier = Modifier.padding(bottom = 8.dp)
                     )
@@ -431,7 +431,7 @@ fun ModuleRepoScreen(navigator: DestinationsNavigator) {
                         }
                     }
                 ) {
-                    Text(stringResource(if (editingIndex == null) R.string.add_repository else R.string.repo_apply))
+                    Text(if (editingIndex == null) "Add" else "Apply")
                 }
             },
             dismissButton = {
@@ -441,7 +441,7 @@ fun ModuleRepoScreen(navigator: DestinationsNavigator) {
                         pendingUrl = ""
                     }
                 ) {
-                    Text(stringResource(R.string.cancel))
+                    Text("Cancel")
                 }
             }
         )
@@ -465,7 +465,7 @@ fun ModuleRepoScreen(navigator: DestinationsNavigator) {
                     IconButton(onClick = { showRepoManagerDialog = true }) {
                         Icon(
                             imageVector = Icons.Filled.Edit,
-                            contentDescription = null
+                            contentDescription = "Manage Repositories"
                         )
                     }
                     IconButton(onClick = { navigator.navigate(MetaModuleScreenDestination) }) {
@@ -658,10 +658,10 @@ fun ModuleRepoScreen(navigator: DestinationsNavigator) {
                                                 context,
                                                 selectedModule.downloadUrl,
                                                 fileName,
-                                                context.getString(R.string.repo_download_progress, selectedModule.name)
+                                                "Downloading ${selectedModule.name}"
                                             )
                                         } catch (e: Exception) {
-                                            snackBarHost.showSnackbar(context.getString(R.string.repo_download_error, e.message.orEmpty()))
+                                            snackBarHost.showSnackbar("Error downloading module: ${e.message}")
                                             downloadingModuleName = null
                                         }
                                     }
@@ -895,7 +895,7 @@ private fun ModuleRepoCard(
                         } else {
                             Icon(
                                 imageVector = Icons.Default.CloudDownload,
-                                contentDescription = null,
+                                contentDescription = "Download",
                                 modifier = Modifier.size(20.dp)
                             )
                         }
@@ -936,10 +936,10 @@ private fun TopBar(
         },
         actions = {
             IconButton(onClick = onManageRepos) {
-                Icon(Icons.Filled.Edit, contentDescription = null)
+                Icon(Icons.Filled.Edit, contentDescription = "Manage Repositories")
             }
             IconButton(onClick = onMetaModuleClick) {
-                Icon(Icons.Filled.SettingsSuggest, contentDescription = null)
+                Icon(Icons.Filled.SettingsSuggest, contentDescription = stringResource(id = R.string.module_repo_screen))
             }
         },
         windowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),

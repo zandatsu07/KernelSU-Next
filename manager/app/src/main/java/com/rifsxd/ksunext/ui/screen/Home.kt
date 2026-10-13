@@ -1240,7 +1240,7 @@ private fun InfoCard(autoExpand: Boolean = false) {
                     ) {
                         Icon(
                             imageVector = Icons.Filled.KeyboardArrowDown,
-                            contentDescription = if (expanded) null else null,
+                            contentDescription = if (expanded) "Show less" else "Show more",
                             modifier = Modifier.graphicsLayer {
                                 rotationZ = rotationAngle
                             }
@@ -1269,33 +1269,33 @@ fun ContributorsCard() {
             login = "rifsxd",
             name = "Rifat Azad",
             githubUrl = "https://github.com/rifsxd",
-            role = stringResource(R.string.contributor_lead_developer),
+            role = "Lead Developer",
             donationUrl = "https://github.com/KernelSU-Next/KernelSU-Next/tree/dev?tab=readme-ov-file#-donations"
         ),
         Contributor(
             login = "tiann",
             name = "Weishu",
             githubUrl = "https://github.com/tiann",
-            role = stringResource(R.string.contributor_kernel_author),
+            role = "KernelSU Author",
             donationUrl = "https://www.patreon.com/weishu"
         ),
         Contributor(
             login = "fatalcoder524",
             githubUrl = "https://github.com/fatalcoder524",
-            role = stringResource(R.string.contributor_frontend_maintainer),
+            role = "Frontend Maintainer",
             donationUrl = "https://github.com/sponsors/fatalcoder524"
         ),
         Contributor(
             login = "pershoot",
             githubUrl = "https://github.com/pershoot",
-            role = stringResource(R.string.contributor_backend_maintainer),
+            role = "Backend Maintainer",
             donationUrl = "https://github.com/sponsors/pershoot"
         ),
         Contributor(
             login = "maxsteeel",
             name = "Max",
             githubUrl = "https://github.com/maxsteeel",
-            role = stringResource(R.string.contributor_legacy_maintainer),
+            role = "Legacy Maintainer",
             donationUrl = "https://github.com/sponsors/maxsteeel"
         )
     )
