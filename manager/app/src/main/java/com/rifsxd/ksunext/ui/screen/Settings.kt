@@ -728,7 +728,6 @@ private fun SusfsLoadBottomSheet(
             ListItem(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(8.dp))
                     .toggleable(
                         value = autoLoadEnabled,
                         enabled = !autoLoadUpdating,
@@ -742,7 +741,7 @@ private fun SusfsLoadBottomSheet(
                     Switch(
                         checked = autoLoadEnabled,
                         enabled = !autoLoadUpdating,
-                        onCheckedChange = onAutoLoadChanged
+                        onCheckedChange = null
                     )
                 }
             )
@@ -818,14 +817,6 @@ private fun AppSettingsCard(
             val timeoutLabelRes = timeoutOptions.find { it.first == appLockTimeout }?.second
                 ?: R.string.settings_app_lock_timeout_1m
             val timeoutLabel = stringResource(timeoutLabelRes)
-            val onRequireBiometricChange: (Boolean) -> Unit = { newValue ->
-                if (newValue && !(context.getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager).isDeviceSecure) {
-                    Toast.makeText(context, context.getString(R.string.settings_app_lock_no_credential), Toast.LENGTH_SHORT).show()
-                } else {
-                    requireBiometric = newValue
-                    prefs.edit { putBoolean("enable_biometric_lock", newValue) }
-                }
-            }
 
             ListItem(
                 modifier = Modifier
@@ -834,7 +825,14 @@ private fun AppSettingsCard(
                     .toggleable(
                         value = requireBiometric,
                         role = Role.Switch,
-                        onValueChange = onRequireBiometricChange
+                        onValueChange = { newValue ->
+                            if (newValue && !(context.getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager).isDeviceSecure) {
+                                Toast.makeText(context, context.getString(R.string.settings_app_lock_no_credential), Toast.LENGTH_SHORT).show()
+                                return@toggleable
+                            }
+                            requireBiometric = newValue
+                            prefs.edit { putBoolean("enable_biometric_lock", newValue) }
+                        }
                     ),
                     colors = ListItemDefaults.colors(containerColor = Color.Transparent),
                     leadingContent = { Icon(Icons.Filled.Lock, null) },
@@ -887,7 +885,7 @@ private fun AppSettingsCard(
                     trailingContent = {
                         Switch(
                             checked = requireBiometric,
-                            onCheckedChange = onRequireBiometricChange
+                            onCheckedChange = null // Handled by toggleable
                         )
                     }
                 )
