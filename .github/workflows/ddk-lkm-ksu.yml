@@ -40,9 +40,8 @@ jobs:
     - name: Checkout source code
       uses: actions/checkout@v7
 
-    - name: Build kernelsu.ko
+    - name: Build kernelsu.ko (aarch64)
       env:
-        MANAGER_PACKAGE: ${{ inputs.manager_package }}
         EXPECTED_MANAGER_SIZE: ${{ inputs.expected_manager_size }}
         EXPECTED_MANAGER_HASH: ${{ inputs.expected_manager_hash }}
       run: |
@@ -53,9 +52,11 @@ jobs:
         echo "=== Building kernelsu.ko for KMI: ${{ inputs.kmi }} ==="
 
         EXTRA_ARGS=""
-        if [ -n "$MANAGER_PACKAGE" ]; then
-          EXTRA_ARGS="$EXTRA_ARGS KSU_MANAGER_PACKAGE=$MANAGER_PACKAGE"
-        fi
+
+        # Samsung Kconfig options
+        SAMSUNG_CONFIGS="CONFIG_KSU_SAMSUNG_KDP=y CONFIG_KSU_SAMSUNG_RKP=y CONFIG_KSU_SAMSUNG_DEFEX=y CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT=y"
+        EXTRA_ARGS="$EXTRA_ARGS $SAMSUNG_CONFIGS"
+
         if [ -n "$EXPECTED_MANAGER_SIZE" ]; then
           EXTRA_ARGS="$EXTRA_ARGS KSU_NEXT_MANAGER_SIZE=$EXPECTED_MANAGER_SIZE"
         fi
@@ -64,17 +65,13 @@ jobs:
         fi
 
         CONFIG_KSU=m CC=clang make $EXTRA_ARGS
-        
+
         echo "=== Build completed ==="
 
-        # Create output directory in GitHub workspace
         OUT_DIR=/github/workspace/out/aarch64
         mkdir -p $OUT_DIR
-
-        # Copy with KMI-specific naming
         OUTPUT_NAME="${{ inputs.kmi }}_kernelsu.ko"
         cp kernelsu.ko "$OUT_DIR/$OUTPUT_NAME"
-        
         echo "Copied to: $OUT_DIR/$OUTPUT_NAME"
         ls -la "$OUT_DIR/$OUTPUT_NAME"
         echo "Size: $(du -h "$OUT_DIR/$OUTPUT_NAME" | cut -f1)"
@@ -89,7 +86,6 @@ jobs:
 
     - name: Build kernelsu.ko for x64
       env:
-        MANAGER_PACKAGE: ${{ inputs.manager_package }}
         EXPECTED_MANAGER_SIZE: ${{ inputs.expected_manager_size }}
         EXPECTED_MANAGER_HASH: ${{ inputs.expected_manager_hash }}
       run: |
@@ -106,9 +102,6 @@ jobs:
         pushd /opt/ddk/src/$kmi
         export KDIR=/opt/ddk/kdir-x64/$kmi
 
-        # ddk-min images contain the source tarball, whose modpost patch is
-        # not applied to the fresh x86 kdir.  Keep the patch idempotent so
-        # this also works when the image already contains one or more fixes.
         MODPOST=scripts/mod/modpost.c
         sed -i -E 's/^([[:space:]]*)check_exports\(mod\);/\1\/\/ check_exports(mod);/' "$MODPOST"
         sed -i -E 's/^([[:space:]]*)s->module = exp->module;/\1\/\/ s->module = exp->module;/' "$MODPOST"
@@ -121,23 +114,19 @@ jobs:
             scripts/config --file $KDIR/.config -e CONFIG_CFI_ICALL_NORMALIZE_INTEGERS
         fi
         make O=$KDIR modules_prepare
-        # Generate SELinux headers through Kbuild in this x86 output tree.
         make O=$KDIR security/selinux/built-in.a
         popd
-        
+
         echo "=== Building x64 kernelsu.ko for KMI: ${{ inputs.kmi }} ==="
 
         EXTRA_ARGS=""
-        if [ -n "$MANAGER_PACKAGE" ]; then
-          EXTRA_ARGS="$EXTRA_ARGS KSU_MANAGER_PACKAGE=$MANAGER_PACKAGE"
-        fi
         if [ -n "$EXPECTED_MANAGER_SIZE" ]; then
           EXTRA_ARGS="$EXTRA_ARGS KSU_NEXT_MANAGER_SIZE=$EXPECTED_MANAGER_SIZE"
         fi
         if [ -n "$EXPECTED_MANAGER_HASH" ]; then
           EXTRA_ARGS="$EXTRA_ARGS KSU_NEXT_MANAGER_HASH=$EXPECTED_MANAGER_HASH"
         fi
-        
+
         MDIR=$(realpath .)
 
         if [ "$kmi" == "android17-6.18" ]; then
@@ -145,23 +134,19 @@ jobs:
         else
           make -C $KDIR M=$MDIR src=$MDIR compile_commands.json modules CONFIG_KSU=m CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER=y $EXTRA_ARGS
         fi
-        
+
         echo "=== Build completed ==="
 
-        # Create output directory in GitHub workspace
         OUT_DIR=/github/workspace/out/x86_64
         mkdir -p $OUT_DIR
-
-        # Copy with KMI-specific naming
         OUTPUT_NAME="${{ inputs.kmi }}_kernelsu.ko"
         cp kernelsu.ko "$OUT_DIR/$OUTPUT_NAME"
-        
         echo "Copied to: $OUT_DIR/$OUTPUT_NAME"
         ls -la "$OUT_DIR/$OUTPUT_NAME"
         echo "Size: $(du -h "$OUT_DIR/$OUTPUT_NAME" | cut -f1)"
         llvm-strip -d "$OUT_DIR/$OUTPUT_NAME"
         echo "Size after stripping: $(du -h "$OUT_DIR/$OUTPUT_NAME" | cut -f1)"
-        
+
     - name: Upload x64 kernelsu.ko artifact
       uses: actions/upload-artifact@v7
       with:
