@@ -35,9 +35,9 @@ jobs:
     with:
       kmi: ${{ matrix.kmi }}
       manager_package: ${{ inputs.manager_package || '' }}
-      expected_manager_size: ${{ inputs.expected_manager_size || '' }}
-      expected_manager_hash: ${{ inputs.expected_manager_hash || '' }}
-  
+      expected_manager_size: ${{ inputs.expected_manager_size || vars.EXPECTED_MANAGER_SIZE }}
+      expected_manager_hash: ${{ inputs.expected_manager_hash || vars.EXPECTED_MANAGER_HASH }}
+
   build-lkm-susfs:
     strategy:
       matrix:
