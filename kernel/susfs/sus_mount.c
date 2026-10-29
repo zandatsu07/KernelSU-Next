@@ -109,6 +109,7 @@
  */
 #include <linux/module.h>
 #include <linux/kprobes.h>
+#include <linux/kernel.h>  /* clamp_t()/DIV_ROUND_UP() for the pass cap */
 #include <linux/fs.h>
 #include <linux/seq_file.h>
 #include <linux/stat.h>     /* struct statx (stx_mnt_id) */
@@ -146,6 +147,7 @@
 #include "susfs_abi.h"
 #include "susfs_log.h"
 #include "susfs.h"	/* module-wide declarations */
+#include "ksu_allow_gate.h"	/* the control-node gate is su's own */
 #include "susfs_kprobe.h"
 
 /* ---- the "which mounts are ours" prefix list: state ----
@@ -377,14 +379,15 @@ static DEFINE_MUTEX(sus_mount_ctl_lock);
  * therefore carries the s_dev it was learned on and is dropped when (a) its superblock is torn
  * down (kprobe on generic_shutdown_super(), the earliest point where nothing can have taken the
  * id yet), (b) a mount that is NOT ours is seen carrying that id - proof of a recycle, so the
- * hide hook drops the entry right there (sus_mount_idmap_drop()), which is what keeps the table
- * fixed-size by reusing freed slots - or (c) it is refreshed by seeing one of OUR mounts again.
+ * hide hook drops the entry right there (sus_mount_idmap_drop(), which compacts the table) - or
+ * (c) it is refreshed by seeing one of OUR mounts again.
  * Left over is an id recycled while nobody reads a mount table at all: no reader then holds a
  * mount list to compare the rewritten number against.  A shown_id needs no expiry of its own:
  * an ancestor of its mount cannot be unmounted while the child is alive. */
-#define SUS_MOUNT_IDMAP_MAX 64
+/* 1024 slots: the scan marks at most 720; overflow is counted and warned once. */
+#define SUS_MOUNT_IDMAP_MAX 1024
 
-/* sus_id == 0 marks a free slot; mnt ids are never 0. */
+/* Sorted by sus_id; mnt ids are never 0. */
 struct sus_mount_idmap_entry {
     int sus_id;
     int shown_id;
@@ -396,6 +399,7 @@ static int n_idmap;
 static DEFINE_SPINLOCK(idmap_lock);
 static atomic_t n_idmap_recycled = ATOMIC_INIT(0);	/* stale entries dropped */
 static atomic_t n_idmap_dropped_dev = ATOMIC_INIT(0);	/* dropped at sb teardown */
+static atomic_t n_idmap_full = ATOMIC_INIT(0);		/* failed insert attempts, not distinct mounts */
 
 static atomic_t n_fdinfo_hits = ATOMIC_INIT(0);
 static atomic_t n_fdinfo_rewrites = ATOMIC_INIT(0);
@@ -405,88 +409,106 @@ static atomic_t n_statx_rewrites = ATOMIC_INIT(0);
 static void sus_mount_idmap_add(int sus_id, int shown_id, dev_t s_dev)
 {
     unsigned long flags;
-    int i, slot = -1;
+    int lo, hi, pos;
 
     if (sus_id <= 0 || shown_id <= 0)
         return;
     spin_lock_irqsave(&idmap_lock, flags);
-    /* Seen again on every enable and by both paths in, so an existing entry must not be
-     * appended twice: the table is fixed size. */
-    for (i = 0; i < n_idmap; i++) {
-        if (mount_idmap[i].sus_id == sus_id) {
-            mount_idmap[i].shown_id = shown_id;
-            mount_idmap[i].s_dev = s_dev;
-            goto out;
-        }
-        if (!mount_idmap[i].sus_id && slot < 0)
-            slot = i;
+    /* Sorted by sus_id: binary search under the lock; inserts/deletes are scan/teardown events. */
+    lo = 0; hi = n_idmap;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (mount_idmap[mid].sus_id < sus_id)
+            lo = mid + 1;
+        else
+            hi = mid;
     }
-    if (slot < 0) {
-        if (n_idmap >= SUS_MOUNT_IDMAP_MAX)
-            goto out;
-        slot = n_idmap++;
+    pos = lo;
+    if (pos < n_idmap && mount_idmap[pos].sus_id == sus_id) {
+        mount_idmap[pos].shown_id = shown_id;
+        mount_idmap[pos].s_dev = s_dev;
+        goto out;
     }
-    mount_idmap[slot].sus_id = sus_id;
-    mount_idmap[slot].shown_id = shown_id;
-    mount_idmap[slot].s_dev = s_dev;
+    if (n_idmap >= SUS_MOUNT_IDMAP_MAX) {
+        /* No slot: sus_mount_shown_for() answers 0 and statx/fdinfo keep the KSU-range id. */
+        if (atomic_inc_return(&n_idmap_full) == 1)
+            pr_warn("sus_mount: id map full at %d entries - further marked mounts keep their KSU-range id in statx(STATX_MNT_ID) and fdinfo; raise SUS_MOUNT_IDMAP_MAX\n",
+                    SUS_MOUNT_IDMAP_MAX);
+        goto out;
+    }
+    memmove(&mount_idmap[pos + 1], &mount_idmap[pos],
+            (n_idmap - pos) * sizeof(mount_idmap[0]));
+    mount_idmap[pos].sus_id = sus_id;
+    mount_idmap[pos].shown_id = shown_id;
+    mount_idmap[pos].s_dev = s_dev;
+    n_idmap++;
 out:
     spin_unlock_irqrestore(&idmap_lock, flags);
 }
 
-/* Every entry whose mount lived on @s_dev is worthless now: that superblock is
- * being shut down (see the note on sus_mount_ident_drop_dev()). */
 static void sus_mount_idmap_drop_dev(dev_t s_dev)
 {
     unsigned long flags;
     int i;
 
     spin_lock_irqsave(&idmap_lock, flags);
-    for (i = 0; i < n_idmap; i++) {
-        if (mount_idmap[i].sus_id && mount_idmap[i].s_dev == s_dev) {
-            mount_idmap[i].sus_id = 0;
-            mount_idmap[i].shown_id = 0;
+    for (i = 0; i < n_idmap; ) {
+        if (mount_idmap[i].s_dev == s_dev) {
+            memmove(&mount_idmap[i], &mount_idmap[i + 1],
+                    (n_idmap - i - 1) * sizeof(mount_idmap[0]));
+            n_idmap--;
             atomic_inc(&n_idmap_dropped_dev);
+        } else {
+            i++;
         }
     }
     spin_unlock_irqrestore(&idmap_lock, flags);
 }
 
-/* The id in @sus_id now belongs to a mount that is NOT ours, so what was learned for it
- * described a mount that no longer exists - a recycled id, observable in the hide hooks. */
 static void sus_mount_idmap_drop(int sus_id)
 {
     unsigned long flags;
-    int i;
+    int lo, hi, pos;
 
     if (sus_id <= 0)
         return;
     spin_lock_irqsave(&idmap_lock, flags);
-    for (i = 0; i < n_idmap; i++) {
-        if (mount_idmap[i].sus_id == sus_id) {
-            mount_idmap[i].sus_id = 0;
-            mount_idmap[i].shown_id = 0;
-            atomic_inc(&n_idmap_recycled);
-            break;
-        }
+    lo = 0; hi = n_idmap;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (mount_idmap[mid].sus_id < sus_id)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    pos = lo;
+    if (pos < n_idmap && mount_idmap[pos].sus_id == sus_id) {
+        memmove(&mount_idmap[pos], &mount_idmap[pos + 1],
+                (n_idmap - pos - 1) * sizeof(mount_idmap[0]));
+        n_idmap--;
+        atomic_inc(&n_idmap_recycled);
     }
     spin_unlock_irqrestore(&idmap_lock, flags);
 }
 
-/* 0 means "not one of ours" - mnt_id 0 is never handed out. */
 static int sus_mount_shown_for(int sus_id)
 {
     unsigned long flags;
-    int i, shown = 0;
+    int lo, hi, shown = 0;
 
     if (sus_id <= 0)
         return 0;
     spin_lock_irqsave(&idmap_lock, flags);
-    for (i = 0; i < n_idmap; i++) {
-        if (mount_idmap[i].sus_id == sus_id) {
-            shown = mount_idmap[i].shown_id;
-            break;
-        }
+    lo = 0; hi = n_idmap;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (mount_idmap[mid].sus_id < sus_id)
+            lo = mid + 1;
+        else
+            hi = mid;
     }
+    if (lo < n_idmap && mount_idmap[lo].sus_id == sus_id)
+        shown = mount_idmap[lo].shown_id;
     spin_unlock_irqrestore(&idmap_lock, flags);
     return shown;
 }
@@ -529,7 +551,7 @@ static int sus_mount_shown_id(struct mount *mnt)
  * filesystem - hence the kprobe on generic_shutdown_super() that drops every record whose
  * s_dev is going away. */
 #define SUS_MOUNT_DEVNAME_MAX 64
-#define SUS_MOUNT_IDENT_MAX 32
+#define SUS_MOUNT_IDENT_MAX 1024
 /* Defined with the scan helpers further down; the identity test needs it here. */
 static bool sus_mount_path_is_ours(const char *s);
 
@@ -632,7 +654,9 @@ static bool sus_mount_ident_match(struct mount *r)
         const struct sus_mount_ident *e = &mount_ident[i];
         unsigned long e_ino = smp_load_acquire(&e->root_ino);
 
-        if (e_ino && e_ino == ino && e->s_dev == r->mnt.mnt_sb->s_dev)
+        if (!e_ino)
+            continue;	/* free or invalidated slot: neither of its keys is valid */
+        if (e_ino == ino && e->s_dev == r->mnt.mnt_sb->s_dev)
             return true;
         if (e->devname_is_path && devname &&
             (e->devname_truncated
@@ -658,6 +682,11 @@ static void sus_mount_ident_drop_dev(dev_t s_dev)
     spin_lock_irqsave(&ident_lock, flags);
     for (i = 0; i < n_ident; i++) {
         if (smp_load_acquire(&mount_ident[i].root_ino) && mount_ident[i].s_dev == s_dev) {
+            /* The devname arm has to die first: it is tested independently of root_ino, so
+             * clearing only the inode number left the record hiding any mount that reused
+             * the source string - the stale-record bug this whole hook exists to prevent. */
+            mount_ident[i].devname_is_path = false;
+            mount_ident[i].devname[0] = '\0';
             smp_store_release(&mount_ident[i].root_ino, 0);
             atomic_inc(&n_ident_dropped_dev);
         }
@@ -1398,9 +1427,7 @@ static struct kretprobe kr_statx_do = {
 };
 static bool kr_statx_do_ok;
 
-/* Live entries, not slots: after an invalidation the slot is free but the slot
- * count stays where it was, and a diagnostic that reads "idmap=6" while only two
- * entries are usable is the kind of number this project keeps catching. */
+/* n_idmap is already the live count (the array is compacted); kept as its own accessor. */
 static int sus_mount_idmap_live(void)
 {
     unsigned long flags;
@@ -1435,7 +1462,7 @@ static int sus_mount_stat_show(char *buf, const struct kernel_param *kp)
                      "idmap=%d/%d  ident=%d/%d  hide=%d su_domain=%d\n"
                      "show_probes=%d/3 (show_vfsstat/show_mountinfo/show_vfsmnt)\n"
                      "ident: hits=%d learned_ids=%d full=%d dropped_dev=%d\n"
-                     "idmap: recycled_dropped=%d dropped_dev=%d\n"
+                     "idmap: recycled_dropped=%d dropped_dev=%d full=%d\n"
                      "sb: down=%d (probe=%d)\n"
                      "clone: walks=%d learned=%d (probe=%d)\n"
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
@@ -1455,6 +1482,7 @@ static int sus_mount_stat_show(char *buf, const struct kernel_param *kp)
                      atomic_read(&n_ident_dropped_dev),
                      atomic_read(&n_idmap_recycled),
                      atomic_read(&n_idmap_dropped_dev),
+                     atomic_read(&n_idmap_full),
                      atomic_read(&n_sb_down), (int)kp_sb_down_ok,
                      atomic_read(&n_clone_walks), atomic_read(&n_clone_learned),
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
@@ -1636,6 +1664,9 @@ static bool sus_mount_path_is_ours(const char *s)
  * afterwards (allocated and freed there, so the pairing the kernel expects stays
  * intact). */
 #define SUS_MOUNT_ID_BATCH 8
+/* Initial cap 16; the walk sets the effective cap and SUS_MOUNT_MAX_SCAN bounds its cost. */
+#define SUS_MOUNT_SCAN_PASSES 16
+#define SUS_MOUNT_SCAN_PASSES_MAX 256
 
 /* ---- control surface: which mounts are ours ---- */
 
@@ -2057,7 +2088,7 @@ static int sus_mount_keep_proc_open(struct inode *inode, struct file *file)
 	/* 0777 node + this check, like every other control node: a restrictive mode would
 	 * answer EACCES (advertising that the node exists) before sus_path could answer
 	 * ENOENT. */
-	if (current_uid().val != 0)
+	if (!susfs_control_visible())
 		return -ENOENT;
 	return single_open(file, sus_mount_keep_proc_show, NULL);
 }
@@ -2070,7 +2101,7 @@ static ssize_t sus_mount_keep_proc_write(struct file *file, const char __user *b
 
 	/* Same reason as the open check: an fd opened before the process dropped
 	 * privileges must not become a way in. */
-	if (current_uid().val != 0)
+	if (!susfs_control_visible())
 		return -ENOENT;
 	if (len == 0)
 		return 0;
@@ -2106,7 +2137,8 @@ static const struct proc_ops sus_mount_keep_proc_ops = {
 
 static struct proc_dir_entry *sus_mount_keep_entry;
 
-static int sus_mount_scan_ns(struct mnt_namespace *ns, char *buf, unsigned long min)
+static int sus_mount_scan_ns(struct mnt_namespace *ns, char *buf, unsigned long min,
+                             bool *more, unsigned int *seen_out)
 {
     int batch[SUS_MOUNT_ID_BATCH];
     /* The ids the mounts already owned, so they can be handed back to the kernel's ida once
@@ -2121,9 +2153,10 @@ static int sus_mount_scan_ns(struct mnt_namespace *ns, char *buf, unsigned long 
     int scan_logged = 0;
     int marked = 0;
     unsigned int n_devname = 0, n_dpath_ok = 0, n_dpath_err = 0;
+    *more = false;
+    *seen_out = 0;
     unsigned int n_skipped_ns = 0, n_skipped_marked = 0;
     bool hit_cap = false;
-    bool failed = false;
     int i;
 
     if (!sus_mount_ns_walk_begin()) {
@@ -2220,9 +2253,9 @@ static int sus_mount_scan_ns(struct mnt_namespace *ns, char *buf, unsigned long 
         }
 
         if (used >= n_batch) {
-            pr_warn("sus_mount: id batch exhausted in ns %p, remaining mounts left unmarked\n",
-                    ns);
-            failed = true;
+            /* Not an error: the batch is allocated before the lock (ida_alloc_range() may
+             * sleep) and so bounds one pass, not the scan.  The caller runs another pass. */
+            *more = true;
             break;
         }
         new_id = batch[used++];
@@ -2259,12 +2292,10 @@ static int sus_mount_scan_ns(struct mnt_namespace *ns, char *buf, unsigned long 
     if (hit_cap)
         pr_warn("sus_mount: walk of ns %p stopped after %u entries (cap %d), result may be incomplete\n",
                 ns, seen, SUS_MOUNT_MAX_SCAN);
-    if (failed)
-        pr_warn("sus_mount: marking in ns %p stopped early, %d mount(s) marked\n",
-                ns, marked);
     SUSFS_LOGI("sus_mount: ns %p: seen=%u devname_hits=%u dpath_ok=%u dpath_err=%u skipped(other ns/cursor)=%u skipped(already marked)=%u marked=%d ids_alloc=%d\n",
             ns, seen, n_devname, n_dpath_ok, n_dpath_err, n_skipped_ns,
             n_skipped_marked, marked, n_batch);
+    *seen_out = seen;
     return marked;
 }
 
@@ -2272,7 +2303,10 @@ static int sus_mount_mark_ksu_mounts(void)
 {
     char *buf;
     unsigned long min;
-    int marked;
+    int marked = 0;
+    unsigned int pass, max_passes = SUS_MOUNT_SCAN_PASSES;
+    unsigned int want, afford;
+    bool more = false;
 
     /* Fail closed: without all three symbols we cannot own a real id, and a
      * self-made id would leave an ida_free WARN behind on umount. */
@@ -2318,7 +2352,27 @@ static int sus_mount_mark_ksu_mounts(void)
      * through the identity table instead: same superblock, same root dentry, and
      * the hide hooks accept that as well as a KSU-range id, with no cross-namespace
      * walk at all.  That is what closes the leak this file's header describes. */
-    marked = sus_mount_scan_ns(current->nsproxy->mnt_ns, buf, min);
+    /* One pass is bounded by SUS_MOUNT_ID_BATCH, because the ids have to be allocated before
+     * ns_lock is taken (ida_alloc_range() may sleep).  A module store with more bind mounts
+     * than that left the rest unmarked and visible in /proc/mounts, so run passes until the
+     * scan reports nothing more to mark - capped, so a namespace that grows under us cannot
+     * spin here. */
+    for (pass = 0; pass < max_passes; pass++) {
+        unsigned int seen = 0;
+        int n = sus_mount_scan_ns(current->nsproxy->mnt_ns, buf, min, &more, &seen);
+
+        if (n > 0)
+            marked += n;
+        if (!more)
+            break;
+        /* The walk's count sets the passes; SUS_MOUNT_MAX_SCAN bounds passes*seen; past it, count and warn once. */
+        want = DIV_ROUND_UP(seen, SUS_MOUNT_ID_BATCH) + 1;
+        afford = max(SUS_MOUNT_MAX_SCAN / max(seen, 1u), 1u);
+        max_passes = clamp_t(unsigned int, min(want, afford), 1u, SUS_MOUNT_SCAN_PASSES_MAX);
+    }
+    if (more)
+        pr_warn("sus_mount: still more mounts to mark after %u passes of %d (%d marked); raise SUS_MOUNT_MAX_SCAN or SUS_MOUNT_ID_BATCH\n",
+                max_passes, SUS_MOUNT_ID_BATCH, marked);
 
     kfree(buf);
 

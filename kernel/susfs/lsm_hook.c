@@ -1280,6 +1280,16 @@ static void ksu_lsm_hook_drain(void)
         msleep(50);
 }
 
+/* The same wait, for the other features that publish a pointer readers reach with no RCU
+ * read-side section of their own: spoof_cmdline's saved_boot_config (read by seq_puts() in
+ * boot_config_proc_show()) and open_redirect's rule slots (read by kprobe handlers).  It
+ * lives here because this file already resolves synchronize_rcu_tasks() and owns the __nocfi
+ * wrapper the indirect call needs.  Sleeps; process context only. */
+void susfs_wait_for_readers(void)
+{
+    ksu_lsm_hook_drain();
+}
+
 int ksu_register_lsm_hook(struct ksu_lsm_hook *hook)
 {
     return ksu_lsm_hook(hook);
@@ -1288,6 +1298,19 @@ int ksu_register_lsm_hook(struct ksu_lsm_hook *hook)
 void ksu_unregister_lsm_hook(struct ksu_lsm_hook *hook)
 {
     ksu_lsm_unhook(hook);
+}
+
+/* Whether the table the hook insertion actually walks can be resolved at all: the < 6.12
+ * path inserts into security_hook_heads, the >= 6.12 path into static_calls_table.  The init
+ * below only reports; refusing the load is the layer table's call, because only the caller
+ * can turn a missing symbol into a failed module load. */
+bool ksu_lsm_hook_ready(void)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+    return find_kernel_symbol_exact("static_calls_table") != 0;
+#else
+    return find_kernel_symbol_exact("security_hook_heads") != 0;
+#endif
 }
 
 /* No __init/__exit annotation on these two on purpose: the layer table (susfs_main.c) holds their

@@ -55,6 +55,7 @@
 #include "susfs.h"	/* susfs_expose_proc, sus_path_dirent_filter(), SUS_NR_GETDENTS*_COMPAT */
 #include "susfs_fp_hook.h"	/* struct susfs_fp_hook + install/remove/drain: the table entries */
 #include "ksu_umount_gate.h"	/* susfs_is_current_proc_umounted_app (issue #34) */
+#include "ksu_allow_gate.h"	/* the control-node gate is su's own */
 #include "susfs_kprobe.h"
 
 /* KSTAT_SPOOF_* bits live in susfs_abi.h (upstream declares them in susfs.h next to struct
@@ -1596,7 +1597,7 @@ static __nocfi void susfs_kstat_post(long nr, bool compat, const unsigned long *
  * before this change, on the getpid line of susfs_bench (no entry of ours is involved there, so it
  * is the cost of whatever fires on every syscall):
  *
- *     kstat layer forced off (fail_layer=6)   126 / 126 / 126 ns   <- no tracepoint
+ *     kstat layer forced off (fail_layer=10)   126 / 126 / 126 ns   <- no tracepoint
  *     everything armed                        151 / 150 / 151 ns   <- tracepoint registered
  *
  * i.e. +25..31 ns per syscall, on every syscall, whether or not it is one this module cares about.
@@ -2261,7 +2262,7 @@ static int kstat_proc_show(struct seq_file *m, void *v)
 static int kstat_proc_open(struct inode *inode, struct file *file)
 {
 	/* root-only, like kstat_proc_open() above - 0777 is deliberate (see susfs_kstat_init()) */
-	if (current_uid().val != 0)
+	if (!susfs_control_visible())
 		return -ENOENT;
 	return single_open(file, kstat_proc_show, NULL);
 }
@@ -2294,7 +2295,7 @@ static ssize_t kstat_proc_write(struct file *file, const char __user *buf,
 
 	/* Same gate as kstat_proc_open(): open() alone is not enough - an fd opened by root and
 	 * handed on would keep working, which is why the sibling files check both. */
-	if (current_uid().val != 0)
+	if (!susfs_control_visible())
 		return -ENOENT;
 
 	if (len >= sizeof(cmd))

@@ -39,6 +39,11 @@ int susfs_imports_guard(void);
  * pointers); the attribute belongs on the definition, so it is not repeated here. */
 int susfs_imports_crosscheck(void);
 
+/* Wait until no task can still be inside a window it entered before this call - a kprobe
+ * handler, or boot_config_proc_show()'s seq_puts().  synchronize_rcu() is NOT enough for
+ * either (neither runs in an RCU read-side section); see lsm_hook.c.  Sleeps. */
+void susfs_wait_for_readers(void);
+
 /* Add a path to sus_path's hidden set from kernel code (no supercall needed); returns 0 or negative errno. */
 int sus_path_add_hidden(const char *path);
 
@@ -101,6 +106,10 @@ bool susfs_hide_modules_node_ready(void);
  * operator who cannot see the rule table cannot tell "registered" from "hiding"; root-only, everyone else gets ENOENT. */
 #define SUSFS_PATH_NODE "/proc/susfs_path"
 
+/* sus_map's rule node: add/del/clear the mappings the maps/smaps/map_files walk hides.  Root-only
+ * through the same su-side gate as the other control nodes. */
+#define SUSFS_MAP_NODE "/proc/susfs_map"
+
 /* Whether the /proc/susfs_* control nodes are created at all.  Defaults to TRUE; they are created only when the LSM layer
  * that hides them is installed, so nobody ends up with an unprotected control node, and expose_proc=0 removes them. */
 extern bool susfs_expose_proc;
@@ -136,6 +145,28 @@ void susfs_avc_spoof_exit(void);
 
 int susfs_supercall_init(void);
 void susfs_supercall_exit(void);
+
+/* Feature registry for the reboot(2) supercall.  A layer arms its feature only after its init
+ * returned 0, so a non-fatal layer that failed is neither advertised by SHOW_ENABLED_FEATURES
+ * nor allowed to have its commands hijacked (userspace then keeps its ERR_CMD_NOT_SUPPORTED
+ * sentinel).  The reboot kprobe reads the bitmap with test_bit(); the arm happens once, in
+ * process context, before the module can serve a command. */
+enum susfs_feature {
+	SUSFS_FEAT_SUS_PATH = 0,
+	SUSFS_FEAT_SUS_MOUNT,
+	SUSFS_FEAT_SUS_KSTAT,
+	SUSFS_FEAT_SPOOF_UNAME,
+	SUSFS_FEAT_ENABLE_LOG,
+	SUSFS_FEAT_HIDE_SYMS,
+	SUSFS_FEAT_SPOOF_CMDLINE,
+	SUSFS_FEAT_OPEN_REDIRECT,
+	SUSFS_FEAT_SUS_MAP,
+	SUSFS_FEAT_AVC_SPOOF,	/* commands only: no upstream CONFIG_* line for it */
+	SUSFS_FEAT_COUNT,
+};
+
+void susfs_supercall_arm_feature(enum susfs_feature feature);
+bool susfs_supercall_feature_armed(enum susfs_feature feature);
 
 /* feature supercall handlers (upstream signature: void xxx(void __user **arg)) */
 void susfs_uname_supercall(void __user **arg);
@@ -173,6 +204,10 @@ long susfs_opath_post_fd(long ret);
  * apart.  NULL inode means "not hidden" (a negative dentry). */
 struct inode;
 bool sus_path_inode_hidden_public(struct inode *inode);
+
+/* Whether any sus_path rule is live right now: the create-family entries test this before
+ * they resolve a path, so an empty table costs one load and nothing else. */
+bool sus_path_rules_present(void);
 
 /* Whether a 0777 /proc/susfs_* control node may be created.  Two independent conditions, neither optional: susfs_expose_proc
  * (the operator opted in) and sus_path_lsm_active() (with 0777 DAC passes every caller, so only the LSM layer can still
@@ -215,5 +250,10 @@ static inline bool susfs_open_redirect_active(void)
  * rules - and on by default (the or_entry parameter can turn it off). */
 int susfs_or_entry_init(void);
 void susfs_or_entry_exit(void);
+
+/* The create family's entry layer (susfs_create_gate.c): answers EACCES for a hidden name
+ * where filename_create() would have answered EEXIST before any LSM hook could run. */
+int susfs_create_gate_init(void);
+void susfs_create_gate_exit(void);
 
 #endif

@@ -55,6 +55,7 @@
 #include "susfs.h"	/* susfs_abi_path_ok */
 #include "symbol_resolver.h"	/* find_kernel_symbol_exact, for optional compat probes */
 #include "ksu_umount_gate.h"	/* susfs_is_current_proc_umounted_app (issue #34) */
+#include "ksu_allow_gate.h"	/* the control-node gate is su's own */
 
 #include "lsm_hook.h"
 #include "fsnotify_lifetime.h"
@@ -461,7 +462,7 @@ static inline bool sus_path_entry_gate_inode(const struct sus_path_entry *e,
                                              struct inode *inode)
 {
     if (e->self_protect)
-        return current_uid().val != 0;
+        return !susfs_control_visible();
     return sus_path_gate_ok(inode);
 }
 
@@ -475,7 +476,7 @@ static inline bool sus_path_entry_gate_inode(const struct sus_path_entry *e,
 static inline bool sus_path_entry_gate_any(const struct sus_path_entry *e)
 {
     if (e->self_protect)
-        return current_uid().val != 0;
+        return !susfs_control_visible();
     if (!e->inode)
         return sus_path_gate_uid_ok();
     return sus_path_gate_ok(e->inode);
@@ -805,6 +806,7 @@ static void sus_path_pending_work(struct work_struct *w)
  * looked installed. */
 static int sus_path_inode_getattr(const struct path *path);
 static int sus_path_inode_permission(struct inode *inode, int mask);
+static int sus_path_lsm_readlink(struct dentry *dentry);
 
 /* The signatures MUST match the LSM hook types exactly, and must NOT be __nocfi:
  * this kernel uses kCFI with cross-module checks, so the call site compares type
@@ -843,6 +845,9 @@ static_assert(__builtin_types_compatible_p(LSM_HOOK_FN_TYPE(inode_getattr),
 static_assert(__builtin_types_compatible_p(LSM_HOOK_FN_TYPE(inode_permission),
 					   typeof(&sus_path_inode_permission)),
 	      "inode_permission hook signature mismatch");
+static_assert(__builtin_types_compatible_p(LSM_HOOK_FN_TYPE(inode_readlink),
+					   typeof(&sus_path_lsm_readlink)),
+	      "inode_readlink hook signature mismatch");
 
 /* ---- name-based operations ----
  *
@@ -972,6 +977,11 @@ SUS_LSM_ORIG_CALL(inode_permission, struct inode *inode, int mask)
 	return fn(inode, mask);
 }
 
+SUS_LSM_ORIG_CALL(inode_readlink, struct dentry *dentry)
+{
+	return fn(dentry);
+}
+
 SUS_LSM_ORIG_CALL(inode_unlink, struct inode *dir, struct dentry *dentry)
 {
 	return fn(dir, dentry);
@@ -1097,6 +1107,9 @@ static struct ksu_lsm_hook sus_path_getattr_hook =
 static struct ksu_lsm_hook sus_path_perm_hook =
 	KSU_LSM_HOOK_INSERT(inode_permission, (void *)sus_path_inode_permission);
 
+static struct ksu_lsm_hook sus_path_readlink_hook =
+	KSU_LSM_HOOK_INSERT(inode_readlink, (void *)sus_path_lsm_readlink);
+
 static atomic_t n_enoent_getattr = ATOMIC_INIT(0);
 static atomic_t n_enoent_perm = ATOMIC_INIT(0);
 
@@ -1218,6 +1231,15 @@ bool sus_path_inode_hidden_public(struct inode *inode)
     return sus_path_inode_hidden(inode);
 }
 
+/* Whether any rule is live right now.  The create-family entries run for every
+ * mkdirat/symlinkat/mknodat/linkat on the system, so they test this before they resolve a
+ * path: an empty table costs one load instead of a lookup, and deleting the last rule takes
+ * that cost away again. */
+bool sus_path_rules_present(void)
+{
+    return READ_ONCE(sus_path_count) > 0;
+}
+
 static int sus_path_inode_getattr(const struct path *path)
 {
     struct inode *inode;
@@ -1267,6 +1289,18 @@ static bool sus_path_dentry_hidden(const struct dentry *dentry)
     return inode && sus_path_inode_hidden(inode);
 }
 
+/* Answer readlinkat here, before vfs_readlink() and SELinux's EACCES. */
+static atomic_t n_enoent_readlink_lsm = ATOMIC_INIT(0);
+static int sus_path_lsm_readlink(struct dentry *dentry)
+{
+    if (sus_path_dentry_hidden(dentry)) {
+        atomic_inc(&n_enoent_readlink_lsm);
+        return -ENOENT;
+    }
+    SUS_LSM_PASS_ORIG(sus_path_readlink_hook, inode_readlink, dentry);
+    return 0;
+}
+
 /* ---- readlink: the one face gated on i_op ----
  *
  * do_readlinkat() reaches security_inode_readlink() and vfs_readlink() only when
@@ -1275,14 +1309,14 @@ static bool sus_path_dentry_hidden(const struct dentry *dentry)
  *
  * holds.  For a registered PLAIN FILE neither is true, so the caller got -EINVAL -
  * which says "the path is there" - while the stat family answered ENOENT.  That
- * disagreement is the tell, and no LSM hook can close it: the hook above is not even
- * called on that path.
+ * disagreement is the tell.  The LSM readlink hook above answers that face before the
+ * i_op readlink body; below 6.12 it sits at the chain head, from 6.12 at SELinux's slot.
  *
  * So the gate itself is what gets changed: a registered inode is pointed at a copy of
  * its i_op whose readlink slot is ours.  That makes the condition true, and the slot
  * then answers exactly what the stat family answers, through the same predicate (and
- * therefore the same per-caller gate), at no cost on any other syscall path and with
- * no write into read-only memory.
+ * therefore the same per-caller gate); the copy changes only that slot and writes no
+ * read-only memory.
  *
  * The copy is shared per original i_op and lives as long as the module, so there is no
  * per-inode lifetime to manage: the inode's field simply reverts to the original (or is
@@ -1613,6 +1647,8 @@ struct sus_dirent_layout {
     unsigned char ino_size;     /* 8 native, 4 compat */
     unsigned char name_off;     /* offset of d_name */
     unsigned char reclen_off;   /* offset of d_reclen */
+    unsigned char align;        /* what d_reclen is rounded up to: 8 native, 4 compat */
+    bool type_at_tail;          /* compat has no d_type field: it is the record's last byte */
 };
 
 static const struct sus_dirent_layout sus_dirent_l64 = {
@@ -1620,6 +1656,8 @@ static const struct sus_dirent_layout sus_dirent_l64 = {
     .ino_size = 8,
     .name_off = offsetof(struct linux_dirent64, d_name),
     .reclen_off = offsetof(struct linux_dirent64, d_reclen),
+    .align = sizeof(u64),
+    .type_at_tail = false,
 };
 
 static const struct sus_dirent_layout sus_dirent_compat = {
@@ -1627,6 +1665,8 @@ static const struct sus_dirent_layout sus_dirent_compat = {
     .ino_size = 4,
     .name_off = offsetof(struct sus_dirent64_compat, d_name),
     .reclen_off = offsetof(struct sus_dirent64_compat, d_reclen),
+    .align = sizeof(u32),
+    .type_at_tail = true,
 };
 
 /* "Did this ABI reach us at all" is a different claim from "did we hide something": only the pair
@@ -1913,12 +1953,17 @@ static long sus_path_filter(unsigned long buf, long count,
         /* Everything in this chunk was hidden, and returning 0 here would be read as
          * end-of-directory: the caller stops and never sees the visible entries of the next
          * chunk.  So one record is left behind as a placeholder - d_ino = 0 with an empty
-         * name.  readdir() skips records whose d_ino is 0 (bionic does), which makes the
-         * caller ask again; a hand-written parser sees an entry without a name, still better
-         * than a directory that ends early. */
+         * name.  readdir() returns it like any other record (bionic and glibc both step by
+         * d_reclen and never look at d_ino), so the caller sees one entry without a name and
+         * the next readdir() continues after it - still better than a directory that ends
+         * early, and nothing is hidden by relying on a skip neither libc performs. */
     if (!failed && count > 0 && written == 0) {
         char zero_ino[8] = {0};
-        char nul = '\0';
+        char zbyte = 0;         /* the native layout's d_type field */
+        /* The smallest record this ABI can express: header, one byte of name, and for the
+         * compat layout the type byte that lives in the last one. */
+        unsigned short min_reclen = ALIGN(lay->name_off + (lay->type_at_tail ? 2 : 1),
+                                          lay->align);
 
         /* head_reclen is the first record's own length, read above with this ABI's layout; the
          * buffer still holds it untouched because written == 0 means nothing was moved.  The
@@ -1928,20 +1973,30 @@ static long sus_path_filter(unsigned long buf, long count,
          * cleared.  The hidden name has to be gone from the buffer, not merely invisible to a
          * caller that honours the returned length.
          *
-         * The two scrubs run BEFORE d_ino and name[0] are overwritten, so a failure leaves the
-         * chain itself intact and the `return count` below is honest ("nothing was filtered").
-         * A scrub stopped by a fault can only have zeroed bytes from name[0]'s tail onward -
-         * inside the first record, never its header - so what the caller gets is still a
-         * parseable chain; writing the placeholder first would instead hand it a chain whose
-         * first record is already a placeholder, bytes nothing can parse. */
-        if (head_reclen >= lay->name_off + 1 && head_reclen <= count &&
-            !clear_user((void __user *)(buf + lay->name_off + 1),
-                        head_reclen - lay->name_off - 1) &&
-            !clear_user((void __user *)(buf + head_reclen), count - head_reclen) &&
+         * The scrub runs BEFORE d_ino, d_type and d_reclen are overwritten, so a fault leaves
+         * the first record's own header intact - the placeholder is never written onto a chain
+         * that failed.  A stopped scrub has zeroed a prefix of [name_off, count), so records
+         * behind the fault point can lose their headers too; the `return count` below then
+         * claims "nothing was filtered", which such a chain no longer is.  That is a
+         * copy_from_user fault inside the caller's own buffer, and it fails towards the
+         * kernel's own bytes (the whole chunk is the kernel's output, not ours to leak).
+         *
+         * d_reclen is rewritten rather than left alone: the hidden entry's own length is its
+         * name's length rounded up, and d_type is the hidden file's type, so a parser that
+         * ignores d_ino == 0 still read both out of the record this leaves behind.  Shrinking it
+         * to min_reclen and clearing the type byte says one entry and nothing about it.  d_off
+         * stays as the hidden entry had it, deliberately: that is the cookie telldir() hands
+         * back and seekdir() resumes from, and it is the one field the next call needs to be
+         * right. */
+        if (head_reclen >= min_reclen && head_reclen <= count &&
+            !clear_user((void __user *)(buf + lay->name_off), count - lay->name_off) &&
+            (lay->type_at_tail ||
+             !copy_to_user((void __user *)(buf + lay->name_off - 1), &zbyte, 1)) &&
             !copy_to_user((void __user *)buf, zero_ino, lay->ino_size) &&
-            !copy_to_user((void __user *)(buf + lay->name_off), &nul, 1)) {
+            !copy_to_user((void __user *)(buf + lay->reclen_off), &min_reclen,
+                          sizeof(min_reclen))) {
             atomic_inc(&n_dirent_all_hidden);
-            return head_reclen;
+            return min_reclen;
         }
         /* Could not build the placeholder: filtering would be worse than not filtering, because the
          * caller would lose the chunk entirely. */
@@ -2199,12 +2254,13 @@ static int sus_path_format_list(char *buf, size_t size)
                    hide_from_apps, atomic_read(&n_enoent_getattr),
                    atomic_read(&n_enoent_perm), atomic_read(&n_enoent_nameop),
                    atomic_read(&n_enoent_meta));
-    /* The readlink face works by pointing a registered inode at a copy of its i_op whose
-     * readlink slot is ours (see sus_path_inode_readlink), so what matters here is how
-     * often that slot answers, and whether every copy could be allocated. */
+    /* The readlink face answers in the i_op slot or, before it, in the LSM hook; report
+     * both, plus whether every i_op copy could be allocated. */
     n = sus_path_list_puts(buf, n, &trunc,
-                   "readlink: enoent=%d armfail=%d\n",
-                   atomic_read(&n_enoent_readlink), atomic_read(&n_iop_arm_fail));
+                   "readlink: enoent=%d lsm_enoent=%d armfail=%d\n",
+                   atomic_read(&n_enoent_readlink),
+                   atomic_read(&n_enoent_readlink_lsm),
+                   atomic_read(&n_iop_arm_fail));
     n = sus_path_list_puts(buf, n, &trunc,
                    "dirent: pending=%d (counters: /proc/susfs_kstat)\n",
                    atomic_read(&sus_path_n_pending));
@@ -2283,7 +2339,7 @@ static int sus_path_proc_open(struct inode *inode, struct file *file)
 {
     /* 0777 node + this check: a restrictive mode would answer EACCES (advertising that the
      * node exists) before sus_path could answer ENOENT. */
-    if (current_uid().val != 0)
+    if (!susfs_control_visible())
         return -ENOENT;
     return single_open(file, sus_path_proc_show, NULL);
 }
@@ -2296,7 +2352,7 @@ static ssize_t sus_path_proc_write(struct file *file, const char __user *buf,
 
     /* Same reason as the open check: an fd opened before the process dropped
      * privileges must not become a way in. */
-    if (current_uid().val != 0)
+    if (!susfs_control_visible())
         return -ENOENT;
     if (len == 0)
         return 0;
@@ -2453,6 +2509,12 @@ static int sus_path_publish_entry(struct sus_path_entry *e, bool merge_pending)
             cur->dev = e->dev;
             cur->ino = e->ino;
             strscpy(cur->name, e->name, sizeof(cur->name));
+            /* e was armed before publish: its inode points at our i_op copy and e->orig_iop
+             * holds the original.  The copy now belongs to cur, so the original must move with
+             * it - otherwise cur->orig_iop stays NULL, the restore on retire is a no-op, and
+             * the inode keeps a pointer into this module after it is unloaded. */
+            cur->orig_iop = e->orig_iop;
+            e->orig_iop = NULL;
             cur->inode = e->inode;
             e->inode = NULL;
             atomic_dec(&sus_path_n_pending);
@@ -2621,6 +2683,7 @@ int sus_path_init(void)
             &sus_path_getxattr_hook, &sus_path_listxattr_hook,
             &sus_path_setxattr_hook, &sus_path_removexattr_hook,
             &sus_path_notify_hook,
+            &sus_path_readlink_hook,
         };
         int i;
 
@@ -2732,6 +2795,7 @@ void sus_path_exit(void)
             &sus_path_getxattr_hook, &sus_path_listxattr_hook,
             &sus_path_setxattr_hook, &sus_path_removexattr_hook,
             &sus_path_notify_hook,
+            &sus_path_readlink_hook,
         };
         int i;
 

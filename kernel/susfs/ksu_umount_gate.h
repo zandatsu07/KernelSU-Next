@@ -18,6 +18,17 @@ bool susfs_ksu_umount_ask(uid_t uid);
 /* Upstream's susfs_is_current_proc_umounted_app(): app uid AND KernelSU would umount for it.  The
  * uid half is upstream's literal 10000; the flag half is the predicate that flag is set from, so a
  * su-granted app, the manager and a profile with "umount modules" off are not hidden from. */
+#define SUSFS_PER_USER_RANGE		100000
+#define SUSFS_FIRST_ISOLATED_UID	99000
+#define SUSFS_LAST_ISOLATED_UID		99999
+
+static inline bool susfs_uid_is_isolated(uid_t uid)
+{
+	uid_t appid = uid % SUSFS_PER_USER_RANGE;
+
+	return appid >= SUSFS_FIRST_ISOLATED_UID && appid <= SUSFS_LAST_ISOLATED_UID;
+}
+
 static inline bool susfs_is_current_proc_umounted_app(void)
 {
 	uid_t uid = current_uid().val;
@@ -26,6 +37,11 @@ static inline bool susfs_is_current_proc_umounted_app(void)
 		return false;
 	if (READ_ONCE(susfs_ksu_umount_gate_off))
 		return true;	/* nothing resolved to ask: hide from app uids, as this module did before #34 */
+
+	/* KernelSU has no profile for an isolated uid, so asking it answers the global default; both
+	 * its kernel_umount.c:97 (`|| is_isolated_process`) and the SUSFS patch force umount for them. */
+	if (susfs_uid_is_isolated(uid))
+		return true;
 
 	return susfs_ksu_umount_ask(uid);
 }
@@ -51,7 +67,7 @@ static inline bool susfs_ksu_umount_uid_applies(uid_t uid)
 	uid_t appid = uid % 100000;			/* PER_USER_RANGE */
 
 	return (appid >= 10000 && appid <= 19999) ||	/* is_appuid() */
-	       (appid >= 99000 && appid <= 99999) ||	/* is_isolated_process() */
+	       susfs_uid_is_isolated(uid) ||		/* is_isolated_process() */
 	       uid == 1053;				/* WEBVIEW_ZYGOTE_UID */
 }
 
@@ -76,6 +92,10 @@ static inline bool susfs_is_current_proc_umounted(void)
 
 	if (READ_ONCE(susfs_ksu_umount_gate_off))
 		return false;
+	/* KernelSU forces isolated uids to umount (kernel_umount.c:97 `|| is_isolated_process`) and
+	 * the SUSFS patch sets TIF_PROC_UMOUNTED for them; the no-uid-half scheme must match. */
+	if (susfs_uid_is_isolated(uid))
+		return true;
 	if (!susfs_ksu_umount_uid_applies(uid))
 		return false;
 
